@@ -49,3 +49,5 @@ release:
 
 changelog:
   disable: true
+
+project_name: terraform-provider-onepassword
