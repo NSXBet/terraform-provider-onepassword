@@ -15,16 +15,31 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
+      - name: Install goreleaser
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL https://github.com/goreleaser/goreleaser/releases/latest/download/goreleaser_Linux_x86_64.tar.gz \
+            | tar -xz -C "$HOME/.local/bin" goreleaser
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@v6
-        id: import_gpg
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.PASSPHRASE }}
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          PASSPHRASE: ${{ secrets.PASSPHRASE }}
+        run: |
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          printf 'allow-preset-passphrase\nallow-loopback-pinentry\n' > ~/.gnupg/gpg-agent.conf
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          FP=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+          KG=$(gpg --list-secret-keys --with-colons --with-keygrip | awk -F: '/^grp/{print $10; exit}')
+          PRESET="$(gpgconf --list-dirs libexecdir)/gpg-preset-passphrase"
+          if [ -n "$PASSPHRASE" ] && [ -n "$KG" ] && [ -x "$PRESET" ]; then
+            gpgconf --kill gpg-agent
+            gpgconf --launch gpg-agent
+            printf '%s' "$PASSPHRASE" | "$PRESET" --preset "$KG"
+          fi
+          echo "FINGERPRINT=$FP" >> "$GITHUB_ENV"
       - name: Run goreleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          args: release --clean
+        run: goreleaser release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+          GPG_FINGERPRINT: ${{ env.FINGERPRINT }}
