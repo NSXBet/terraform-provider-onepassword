@@ -159,7 +159,7 @@ func (r *vaultGroupAccessResource) Update(ctx context.Context, req resource.Upda
 
 	// vault_id and group force replacement, so only permissions can change
 	// here. Apply the difference instead of revoking the whole grant and
-	// re-granting it: grant the added permissions first, then revoke the
+	// re-granting it: grant first (when anything is added), then revoke the
 	// removed ones. The group never loses access in between, and a failure
 	// (for example a rate limit) between the two steps leaves it with more
 	// access than declared rather than none. The next plan shows the rest.
@@ -168,7 +168,11 @@ func (r *vaultGroupAccessResource) Update(ctx context.Context, req resource.Upda
 	current := permissionsOf(state.Permissions)
 	add, remove := permissionDiff(current, permissionsOf(plan.Permissions))
 	if len(add) > 0 {
-		if err := r.client.GrantVaultGroup(ctx, vaultID, group, add); err != nil {
+		// Grant the full desired set, not only the additions: `op vault group
+		// grant` requires a permission's dependencies in the same command
+		// (print_items needs the view_* permissions), even when the group
+		// already holds them. Granting is additive, so this removes nothing.
+		if err := r.client.GrantVaultGroup(ctx, vaultID, group, permissionsOf(plan.Permissions)); err != nil {
 			resp.Diagnostics.AddError("Error updating vault access (grant step)", err.Error())
 			return
 		}
