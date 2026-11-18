@@ -165,7 +165,8 @@ func (r *vaultGroupAccessResource) Update(ctx context.Context, req resource.Upda
 	// access than declared rather than none. The next plan shows the rest.
 	vaultID := plan.VaultID.ValueString()
 	group := plan.Group.ValueString()
-	add, remove := permissionDiff(permissionsOf(state.Permissions), permissionsOf(plan.Permissions))
+	current := permissionsOf(state.Permissions)
+	add, remove := permissionDiff(current, permissionsOf(plan.Permissions))
 	if len(add) > 0 {
 		if err := r.client.GrantVaultGroup(ctx, vaultID, group, add); err != nil {
 			resp.Diagnostics.AddError("Error updating vault access (grant step)", err.Error())
@@ -174,6 +175,16 @@ func (r *vaultGroupAccessResource) Update(ctx context.Context, req resource.Upda
 	}
 	if len(remove) > 0 {
 		if err := r.client.RevokeVaultGroup(ctx, vaultID, group, remove); err != nil {
+			// The grant step succeeded. On error the framework saves the
+			// state this method sets, which defaults to the prior state, so
+			// record the granted permissions; otherwise, when Read returns no
+			// permissions, the next plan would not show the pending revoke.
+			granted, d := types.SetValueFrom(ctx, types.StringType, normalizePerms(append(current, add...)))
+			resp.Diagnostics.Append(d...)
+			if !d.HasError() {
+				state.Permissions = granted
+				resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
+			}
 			resp.Diagnostics.AddError("Error updating vault access (revoke step)", err.Error())
 			return
 		}
