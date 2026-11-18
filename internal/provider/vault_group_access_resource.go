@@ -131,36 +131,52 @@ func (r *vaultGroupAccessResource) Read(ctx context.Context, req resource.ReadRe
 		return
 	}
 
-	permSet, d := types.SetValueFrom(ctx, types.StringType, normalizePerms(g.Permissions))
-	resp.Diagnostics.Append(d...)
-	if resp.Diagnostics.HasError() {
-		return
+	// A group that still has access always holds at least one permission:
+	// 1Password removes the grant when its last permission is revoked. An
+	// empty list for a group that is present therefore means the read did
+	// not include permissions (seen under some `op` sessions), not that the
+	// group has none. Keep the prior state in that case instead of recording
+	// an empty set, which would plan an update for every grant on every run.
+	if len(g.Permissions) > 0 {
+		permSet, d := types.SetValueFrom(ctx, types.StringType, normalizePerms(g.Permissions))
+		resp.Diagnostics.Append(d...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		state.Permissions = permSet
 	}
-	state.Permissions = permSet
 	state.ID = types.StringValue(grantID(state.VaultID.ValueString(), state.Group.ValueString()))
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
 func (r *vaultGroupAccessResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan vaultGroupAccessModel
+	var plan, state vaultGroupAccessModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	// vault_id and group force replacement, so only permissions can change here.
-	// Revoke the whole grant, then re-grant the exact declared set — the
-	// simplest way to make the declared permissions authoritative.
+	// vault_id and group force replacement, so only permissions can change
+	// here. Apply the difference instead of revoking the whole grant and
+	// re-granting it: grant the added permissions first, then revoke the
+	// removed ones. The group never loses access in between, and a failure
+	// (for example a rate limit) between the two steps leaves it with more
+	// access than declared rather than none. The next plan shows the rest.
 	vaultID := plan.VaultID.ValueString()
 	group := plan.Group.ValueString()
-	if err := r.client.RevokeVaultGroup(ctx, vaultID, group, nil); err != nil {
-		resp.Diagnostics.AddError("Error updating vault access (revoke step)", err.Error())
-		return
+	add, remove := permissionDiff(permissionsOf(state.Permissions), permissionsOf(plan.Permissions))
+	if len(add) > 0 {
+		if err := r.client.GrantVaultGroup(ctx, vaultID, group, add); err != nil {
+			resp.Diagnostics.AddError("Error updating vault access (grant step)", err.Error())
+			return
+		}
 	}
-	perms := permissionsOf(plan.Permissions)
-	if err := r.client.GrantVaultGroup(ctx, vaultID, group, perms); err != nil {
-		resp.Diagnostics.AddError("Error updating vault access (grant step)", err.Error())
-		return
+	if len(remove) > 0 {
+		if err := r.client.RevokeVaultGroup(ctx, vaultID, group, remove); err != nil {
+			resp.Diagnostics.AddError("Error updating vault access (revoke step)", err.Error())
+			return
+		}
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
@@ -198,4 +214,28 @@ func normalizePerms(perms []string) []string {
 	out := append([]string(nil), perms...)
 	sort.Strings(out)
 	return out
+}
+
+// permissionDiff returns the permissions in desired but not in current (to
+// grant) and in current but not in desired (to revoke), both sorted.
+func permissionDiff(current, desired []string) (add, remove []string) {
+	have := make(map[string]bool, len(current))
+	for _, p := range current {
+		have[p] = true
+	}
+	want := make(map[string]bool, len(desired))
+	for _, p := range desired {
+		want[p] = true
+		if !have[p] {
+			add = append(add, p)
+		}
+	}
+	for _, p := range current {
+		if !want[p] {
+			remove = append(remove, p)
+		}
+	}
+	sort.Strings(add)
+	sort.Strings(remove)
+	return add, remove
 }
